@@ -8,6 +8,9 @@ import os
 import json
 import pandas as pd # Import pandas for DataFrame display
 import plotly.express as px # For graphs/diagrams
+import time # Import the time module for timing operations
+from docx import Document # Import Document from python-docx for writing DOCX
+from docx.shared import Inches # For potentially adding images, though not used here
 
 # --- IMPORTANT: Load environment variables from .env file ---
 # Ensure python-dotenv is installed (pip install python-dotenv)
@@ -17,7 +20,12 @@ load_dotenv() # This line loads the variables from .env
 
 # Import helper functions and LLM agents
 import utils
-import llm_agents
+import agents.llm_connector as llm_connector
+# Explicitly import the agent functions
+from agents.data_extraction_agent import data_extraction_agent_run
+from agents.analysis_agent import analysis_agent_run
+from agents.proposal_generation_agent import proposal_generation_agent_run
+
 
 # --- Streamlit App Configuration (MUST BE THE FIRST STREAMLIT COMMANDS) ---
 st.set_page_config(layout="wide", page_title="SOW-to-Proposal AI Assistant", initial_sidebar_state="expanded")
@@ -272,31 +280,14 @@ st.markdown("Upload your Scope of Work (SOW) document to get a detailed summary 
 LLM_CHOICE = "gemini" # <--- IMPORTANT: SET YOUR LLM CHOICE HERE! (e.g., "openai" or "gemini")
 
 # Display which LLM is being used in the main content area
-st.info(f"💡 Currently using **{LLM_CHOICE.capitalize()}** for AI generation. Change `LLM_CHOICE` in `app.py` to switch providers.")
+st.info(f"💡 Currently using **{LLM_CHOICE.capitalize()}** for AI generation.")
 
-# Initialize LLM clients only if API keys are available and selected
-llm_agents.openai_client = None
-llm_agents.gemini_model = None
-
-# Attempt to initialize OpenAI client if selected
-if LLM_CHOICE == "openai":
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if openai_api_key:
-        llm_agents.openai_client = llm_agents.OpenAI(api_key=openai_api_key)
-    else:
-        st.error("OpenAI API Key not found. Please set OPENAI_API_KEY in your .env file to use OpenAI.")
-        st.stop() # Stop execution if API key is missing for the chosen LLM
-elif LLM_CHOICE == "gemini":
-    gemini_api_key = os.getenv("GOOGLE_API_KEY")
-    if gemini_api_key:
-        llm_agents.genai.configure(api_key=gemini_api_key)
-        llm_agents.gemini_model = llm_agents.genai.GenerativeModel('gemini-1.5-flash') # Or 'gemini-1.5-pro'
-    else:
-        st.error("Google Gemini API Key not found. Please set GOOGLE_API_KEY in your .env file to use Gemini.")
-        st.stop() # Stop execution if API key is missing for the chosen LLM
-else:
-    st.error(f"Invalid LLM_CHOICE: '{LLM_CHOICE}'. Please set LLM_CHOICE to 'openai' or 'gemini'.")
-    st.stop() # Stop execution if LLM_CHOICE is invalid
+# Initialize LLM clients via the connector
+try:
+    llm_connector.initialize_llm_clients(LLM_CHOICE)
+except ValueError as e:
+    st.error(f"LLM Initialization Error: {e}")
+    st.stop() # Stop execution if LLM client cannot be initialized
 
 
 # Function to clear session state for a fresh start
@@ -309,7 +300,7 @@ st.sidebar.button("🔄 Start Fresh / Reset", on_click=reset_app)
 
 
 # --- File Uploader Section ---
-st.header("1. Upload Your Scope of Work (SOW) 📂")
+st.header("1. Upload Your Scope of Work (SOW) �")
 uploaded_file = st.file_uploader("Select a PDF or DOCX file", type=["pdf", "docx"])
 
 sow_text = ""
@@ -317,6 +308,7 @@ if uploaded_file is not None:
     file_extension = uploaded_file.name.split(".")[-1].lower()
     file_buffer = io.BytesIO(uploaded_file.getvalue())
 
+    start_time_extraction = time.time() # Start timer for extraction
     with st.spinner("🚀 Extracting text from SOW... This may take a moment for larger files."):
         if file_extension == "pdf":
             sow_text = utils.extract_text_from_pdf(file_buffer)
@@ -325,9 +317,10 @@ if uploaded_file is not None:
         else:
             st.error("Unsupported file type. Please upload a PDF or DOCX.")
             sow_text = ""
+    end_time_extraction = time.time() # End timer for extraction
 
     if sow_text:
-        st.success("Text extracted successfully! 🎉")
+        st.success(f"Text extracted successfully! 🎉 (Took {end_time_extraction - start_time_extraction:.2f} seconds)")
         with st.expander("View Raw Extracted Text (Click to expand)"):
             st.text_area("Raw SOW Text", sow_text, height=300, disabled=True)
     else:
@@ -343,18 +336,24 @@ if sow_text:
             st.warning("Please upload an SOW document first.")
         else:
             # Check if the selected LLM client is initialized
-            if (LLM_CHOICE == "openai" and not llm_agents.openai_client) or \
-               (LLM_CHOICE == "gemini" and not llm_agents.gemini_model):
+            if (LLM_CHOICE == "openai" and not llm_connector.openai_client) or \
+               (LLM_CHOICE == "gemini" and not llm_connector.gemini_model):
                 st.error(f"{LLM_CHOICE.capitalize()} LLM client not properly initialized. Please check your API key setup in .env.")
             else:
-                with st.spinner("Analyzing SOW details with AI... This might take a minute."):
-                    sow_structured_data = llm_agents.analyze_sow_structured(sow_text, llm_choice=LLM_CHOICE)
+                start_time_data_extraction_agent = time.time() # Start timer for Data Extraction Agent
+                with st.spinner(" **Data Extraction Agent** is analyzing SOW details..."):
+                    # Corrected function call: directly call the imported function
+                    sow_structured_data = data_extraction_agent_run(sow_text, llm_choice=LLM_CHOICE)
                     if sow_structured_data and not sow_structured_data.get("error"):
                         st.session_state['sow_structured_data'] = sow_structured_data
-                        st.success("SOW analysis complete! ✨")
+                        st.success("Data Extraction Agent complete! ✨")
                     else:
-                        st.error(f"Failed to analyze SOW: {sow_structured_data.get('error', 'Unknown error.')}")
+                        st.error(f"Data Extraction Agent failed: {sow_structured_data.get('error', 'Unknown error.')}")
                         st.session_state['sow_structured_data'] = None # Clear state on error
+                end_time_data_extraction_agent = time.time() # End timer
+                if 'sow_structured_data' in st.session_state and not st.session_state['sow_structured_data'].get("error"):
+                    st.info(f"**Data Extraction Agent** took {end_time_data_extraction_agent - start_time_data_extraction_agent:.2f} seconds.")
+
 
     # Display SOW Analysis Dashboard
     if 'sow_structured_data' in st.session_state and st.session_state['sow_structured_data'] and \
@@ -397,6 +396,7 @@ if sow_text:
                 # Make chart more flexible: only show if count > 0, and auto-scale y-axis
                 fig = px.bar(obj_count_df, x='Category', y='Count', title='Number of Key Objectives Identified', text_auto=True,
                              color_discrete_sequence=['#28a745']) # Green color
+                fig.update_traces(texttemplate='%{text}', textposition='outside')
                 fig.update_layout(xaxis_title="", yaxis_title="Count", showlegend=False,
                                   yaxis_range=[0, obj_count + 1] if obj_count < 5 else None, # Auto-scale for larger counts
                                   height=300) # Fixed height for consistency
@@ -477,6 +477,7 @@ if sow_text:
                 tech_count_df = pd.DataFrame({'Category': ['Technical Requirements'], 'Count': [tech_count]})
                 fig = px.bar(tech_count_df, x='Category', y='Count', title='Number of Technical Requirements Identified', text_auto=True,
                              color_discrete_sequence=['#17a2b8']) # Info color
+                fig.update_traces(texttemplate='%{text}', textposition='outside')
                 fig.update_layout(xaxis_title="", yaxis_title="Count", showlegend=False,
                                   yaxis_range=[0, tech_count + 1] if tech_count < 5 else None, # Auto-scale for smaller counts
                                   height=300) # Fixed height
@@ -508,9 +509,13 @@ if sow_text:
 
         st.markdown("---")
         st.markdown("### 📝 Detailed Narrative Summary of SOW")
-        with st.spinner("✍️ Generating detailed narrative summary..."):
-            detailed_summary = llm_agents.summarize_sow_detailed(sow_data, llm_choice=LLM_CHOICE)
+        start_time_summary = time.time() # Start timer for summary
+        with st.spinner("✍️ **Analysis Agent** is generating detailed narrative summary..."):
+            # Corrected function call: directly call the imported function
+            detailed_summary = analysis_agent_run(sow_data, llm_choice=LLM_CHOICE)
             st.write(detailed_summary)
+        end_time_summary = time.time() # End timer for summary
+        st.info(f"**Analysis Agent** (Summary Generation) took {end_time_summary - start_time_summary:.2f} seconds.")
         st.markdown("---")
 
         # --- Draft Technical Proposal Section ---
@@ -518,27 +523,54 @@ if sow_text:
         st.info("This will generate a preliminary technical proposal based on the SOW analysis. Remember, this is a draft and requires human review and refinement.")
         if st.button("Generate Proposal Draft", key="generate_proposal_btn"):
             # Check if the selected LLM client is initialized
-            if (LLM_CHOICE == "openai" and not llm_agents.openai_client) or \
-               (LLM_CHOICE == "gemini" and not llm_agents.gemini_model):
+            if (LLM_CHOICE == "openai" and not llm_connector.openai_client) or \
+               (LLM_CHOICE == "gemini" and not llm_connector.gemini_model):
                 st.error(f"{LLM_CHOICE.capitalize()} LLM client not properly initialized. Please check your API key setup in .env.")
             else:
-                with st.spinner("🤖 Drafting technical proposal with AI... This will take a moment."):
-                    proposal_draft = llm_agents.draft_technical_proposal(sow_data, llm_choice=LLM_CHOICE)
+                start_time_proposal = time.time() # Start timer for proposal
+                with st.spinner("🤖 **Proposal Generation Agent** is drafting technical proposal... This will take a moment."):
+                    # Corrected function call: directly call the imported function
+                    proposal_draft = proposal_generation_agent_run(sow_data, llm_choice=LLM_CHOICE)
                     st.session_state['proposal_draft'] = proposal_draft
-                    st.success("Technical proposal draft generated! 🎉")
+                    st.success("Technical proposal draft generated!")
+                end_time_proposal = time.time() # End timer for proposal
+                st.info(f"**Proposal Generation Agent** took {end_time_proposal - start_time_proposal:.2f} seconds.")
 
         if 'proposal_draft' in st.session_state and st.session_state['proposal_draft']:
             st.markdown("### ✍️ Your Generated Proposal Draft")
             st.markdown(st.session_state['proposal_draft'])
 
             # Buttons for download and copy
-            col_dl, col_copy = st.columns(2)
-            with col_dl:
+            col_dl_md, col_dl_docx, col_copy = st.columns(3) # Added a column for DOCX download
+            with col_dl_md:
                 st.download_button(
-                    label="Download Proposal Draft (Markdown)",
+                    label="Download as Markdown",
                     data=st.session_state['proposal_draft'],
                     file_name="technical_proposal_draft.md",
                     mime="text/markdown"
+                )
+            with col_dl_docx:
+                # Generate DOCX content
+                docx_buffer = io.BytesIO()
+                doc = Document()
+                # Simple conversion from Markdown to DOCX (basic headers and paragraphs)
+                for line in st.session_state['proposal_draft'].split('\n'):
+                    if line.startswith('## '):
+                        doc.add_heading(line.replace('## ', ''), level=2)
+                    elif line.startswith('# '):
+                        doc.add_heading(line.replace('# ', ''), level=1)
+                    elif line.startswith('- '):
+                        doc.add_paragraph(line.replace('- ', ''), style='List Bullet')
+                    else:
+                        doc.add_paragraph(line)
+                doc.save(docx_buffer)
+                docx_buffer.seek(0) # Rewind the buffer to the beginning
+
+                st.download_button(
+                    label="Download as DOCX",
+                    data=docx_buffer.getvalue(),
+                    file_name="technical_proposal_draft.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 )
             with col_copy:
                 st.text_area("Copy Proposal Draft (Manual Copy)", st.session_state['proposal_draft'], height=200, help="Select all text and copy manually.")
@@ -546,4 +578,4 @@ if sow_text:
 
 # --- Footer ---
 st.markdown("---")
-st.markdown("Built for Masters Project.")
+st.markdown("Built for Masters Project")
